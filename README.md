@@ -100,9 +100,12 @@
     pending/     待发：收到了还没成功转发的
     retry/       重试：转发失败，等着下一次重试的
     dead/        死信：重试用完或永远处理不了的
+    meta/        辅助：每条消息的事件名和 Content-Type（转发时要原样带回）
 ```
 
-三个目录在服务启动时自动创建，权限 `700`（报文里有提交人姓名和邮箱，不能让别的用户读到）。
+四个目录在服务启动时自动创建，权限 `700`（报文里有提交人姓名和邮箱，不能让别的用户读到）。
+
+`meta/` 不在最初的队列设计里，是实现时补的：三个队列目录只存报文原文，而转发时必须把云效那一次的 `Content-Type`（含 charset）和事件名原样带回去，否则走监听服务这条路时中文会变乱码。它只是辅助信息，丢了也不影响转发（回落默认值），所以它不参与限额、不做超龄，只在消息被删干净后顺手清掉。
 
 ### 4.1 文件名就是全部状态
 
@@ -375,6 +378,8 @@ for f in queue/dead/*_auth_*.json; do ./requeue-dead.sh "$f"; done
 | 云效显示 400，日志写"没带 X-Codeup-Delivery" | 中间的 Nginx / 防火墙把没在白名单里声明的请求头滤掉了。检查 `proxy_set_header`，别让它吃掉未知头 |
 | 日志写"内部入口返回 404" | 合并项目 `INTERNAL_ENDPOINT=true` 没开，或目标地址端口填错 |
 | 日志写"转发失败，连接被拒" | 合并项目没起来，或 `RELAY_TARGET_URL` 指向的端口不对 |
+| 日志写"连接失败 / 超时"，但端口是通的 | 先 `curl http://127.0.0.1:18601/internal/yunxiao`，返回 **404 就是合并项目 `INTERNAL_ENDPOINT` 没开**；再看 `RELAY_TARGET_READ_TIMEOUT_MS` 是不是偏小（默认 120 秒，合并项目最坏约 85 秒） |
+| 日志出现"503 + 同一条投递正在处理中" | **正常节流，不是故障**：合并项目正在处理这条消息，还没出结果就会回 503 让我们稍后再试，文件会留在 `retry/` 里按阶梯重试。只有当 503 持续出现且 `pending/` 一直在涨时，才说明合并项目卡住了 |
 | `pending/` 一直有文件不动 | 转发线程卡住或下游一直超时。看 `retry/` 里的次数是不是在涨 |
 | `retry/` 里次数一直涨 | 下游持续失败：先看合并项目日志，再看云效令牌是不是过期 |
 | 卡片一直不来，但日志说转发 200 | **问题不在这个服务**。合并项目已经收下了，去它那边看（`/test/doctor`、发卡日志） |
@@ -408,7 +413,7 @@ for f in queue/dead/*_auth_*.json; do ./requeue-dead.sh "$f"; done
 | `relay.dead.max-age-days` | 7 | 死信保留天数，过期删文件 |
 | `relay.target.url` | `http://127.0.0.1:18601/internal/yunxiao` | 合并项目内部入口 |
 | `relay.target.connect-timeout-ms` | 3000 | 建连接超时 |
-| `relay.target.read-timeout-ms` | 30000 | 等响应超时。合并项目要查两三次云效接口，这里必须留足，设短了会出现"它其实成功了、我们判成失败" |
+| `relay.target.read-timeout-ms` | 120000 | 等响应超时，可用 `RELAY_TARGET_READ_TIMEOUT_MS` 覆盖。合并项目同步调用最多 3 次云效接口再发一次卡片，最坏约 85 秒，所以默认给 120 秒；调大只影响"判定失败"的早晚，不影响正确性 |
 | `relay.target.threads` | 1 | 转发线程数。默认 1 保证按到达顺序；调大后不再保序 |
 
 ---
@@ -418,20 +423,41 @@ for f in queue/dead/*_auth_*.json; do ./requeue-dead.sh "$f"; done
 ```
 src/main/java/com/yiyu/relay/
 ├── RelayApplication.java        启动类
-├── config/                      配置读取、启动校验、目录初始化
+├── config/
+│   ├── RelayProperties.java     全部配置项（对应 .env 里的 RELAY_*）
+│   ├── ConfigSanityChecker.java 启动检查配置之间的矛盾（寿命 vs 阶梯、让路阈值 vs 上限）
+│   └── StartupReporter.java     启动时把队列目录、三个目录条数打到日志
 ├── web/
 │   ├── WebhookController.java   接住云效推送：验签、查大小、查编号、查重、落盘
-│   └── HealthController.java    /health：三个队列条数与最近转发情况
+│   └── HealthController.java    /health：三个队列条数、最老一条多久、最近转发情况
 ├── queue/
-│   ├── QueueStore.java          三个目录的读写、改名、限额、寿命清理
-│   ├── PendingWorker.java       待发线程：扫目录 → 转发 → 删文件 / 进重试
-│   └── RetryWorker.java         重试线程：扫到期文件 → 转发 → 删文件 / 次数加一 / 进死信
-└── forward/
-    ├── RelayClient.java         转发用的 HTTP 客户端，返回码归成三类
-    └── TargetProbe.java         启动时探一次目标地址，404 直接报错
+│   ├── QueueDirectories.java    目录建在哪、怎么列举、按什么排序（排序规则集中在这里）
+│   ├── QueueStore.java          队列门面：入队、改名、换目录、删除、计数
+│   ├── QueueFileName.java       三个目录的文件名规则与解析（就这一处）
+│   ├── QueueHousekeeping.java   限额淘汰、超龄、死信保留期、孤儿元数据清理
+│   └── MetaStore.java           事件名与 Content-Type 的读写
+├── worker/
+│   ├── AbstractWorker.java      消费线程模板：起线程、固定延迟、异常兜底、优雅停止
+│   ├── PendingWorker.java       待发线程：扫 pending → 转发 → 删文件 / 进重试
+│   ├── RetryWorker.java         重试线程：扫到期文件 → 转发 → 删文件 / 次数加一 / 进死信
+│   ├── ForwardingService.java   "读报文 → 转发 → 记统计 → 打日志"，两个线程共用
+│   ├── QueueOutcomeHandler.java 结论 → 队列动作（删 / 进重试 / 进死信），唯一实现处
+│   ├── QueueJanitor.java        定时跑 Housekeeping
+│   └── WorkerStarter.java       应用就绪后才启动线程（避免起了一半就转发）
+├── client/
+│   ├── RelayClient.java         转发用的 HTTP 客户端（JDK 自带，超时可配）
+│   ├── StatusCodePolicy.java    返回码白名单 → 四类结论
+│   ├── CredentialFailureDetector.java  400 里是不是"凭据失效"
+│   └── RelayTarget.java         转发接口（worker 依赖它，不依赖具体实现，便于测试）
+└── support/
+    ├── RetryLadder.java         重试阶梯（配置里几个数就重试几次）
+    ├── TargetProbe.java         启动时探一次目标地址，404 直接报错
+    ├── RelayStats.java          最近转发结果 / 连续失败次数 / 最后成功时间
+    ├── DeliveryIds.java         投递编号清洗（防目录穿越）
+    └── HeaderNames.java         请求头常量（X-Codeup-Delivery 这个名字不能改）
 ```
 
-**读代码的顺序建议**：`QueueStore`（状态全在目录和文件名里，看懂它就看懂一半）→ `WebhookController`（入口）→ `PendingWorker` / `RetryWorker`（两个消费线程）→ `RelayClient`（返回码怎么归类）。
+**读代码的顺序建议**：`QueueFileName`（文件名就是全部状态，看懂它就看懂一半）→ `QueueStore` → `WebhookController`（入口）→ `AbstractWorker` 和两个 Worker（消费）→ `RelayClient` + `StatusCodePolicy`（返回码怎么归类）。
 
 ---
 
