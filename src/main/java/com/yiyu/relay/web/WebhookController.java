@@ -61,7 +61,9 @@ public class WebhookController {
     @PostMapping(PATH)
     public ResponseEntity<String> receive(HttpServletRequest request) {
         if (!tokenMatches(request)) {
-            log.warn("云效推送被拒绝：{} 不匹配（来源 {}）", HeaderNames.TOKEN, request.getRemoteAddr());
+            // 两个头都写过，运维才知道不用只盯着 X-Codeup-Token 查
+            log.warn("云效推送被拒绝：{} 和 {} 两个头都试过了（优先前者），没带或都不匹配配置的密钥（来源 {}）",
+                    HeaderNames.TOKEN, HeaderNames.TOKEN_LEGACY, request.getRemoteAddr());
             return respond(HttpStatus.FORBIDDEN, "token 不匹配");
         }
         String rawDeliveryId = request.getHeader(HeaderNames.DELIVERY);
@@ -137,6 +139,9 @@ public class WebhookController {
     /**
      * 校验密钥。配置为空时一律拒绝 —— 空密钥等于门没锁，
      * 任何人都能 POST 进来让合并项目发卡片。
+     *
+     * <p>请求里的密钥由 {@link #resolveToken} 按优先级取值：云效历史上发过两种头，
+     * 合并项目的 WebhookGuard 两种都认，这里必须跟着认。</p>
      */
     private boolean tokenMatches(HttpServletRequest request) {
         String expected = properties.getWebhookToken();
@@ -144,7 +149,7 @@ public class WebhookController {
             log.error("relay.webhook-token 未配置，拒绝所有云效推送。请在 .env 里设置 YUNXIAO_WEBHOOK_TOKEN");
             return false;
         }
-        String provided = request.getHeader(HeaderNames.TOKEN);
+        String provided = resolveToken(request);
         if (provided == null) {
             return false;
         }
@@ -152,6 +157,27 @@ public class WebhookController {
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
                 provided.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 按优先级取请求里的密钥：新头优先，新头没带才回落到老头。
+     *
+     * <p>刻意不做"任一匹配即通过"：两个头都带时以新头为准。否则只要有一个头带对就放行，
+     * 等于把两个头里更弱的一个变成后门 —— 那是安全洞，不是兼容。</p>
+     *
+     * @param request 原始请求
+     * @return 请求里的密钥；两个头都没带时返回 null
+     */
+    private String resolveToken(HttpServletRequest request) {
+        String primary = request.getHeader(HeaderNames.TOKEN);
+        if (!DeliveryIds.isBlank(primary)) {
+            return primary;
+        }
+        String legacy = request.getHeader(HeaderNames.TOKEN_LEGACY);
+        if (!DeliveryIds.isBlank(legacy)) {
+            return legacy;
+        }
+        return null;
     }
 
     private ResponseEntity<String> respond(HttpStatus status, String body) {

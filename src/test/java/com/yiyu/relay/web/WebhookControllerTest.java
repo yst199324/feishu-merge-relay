@@ -91,6 +91,34 @@ class WebhookControllerTest {
     }
 
     @Test
+    @DisplayName("只带 X-Gitlab-Token 且值正确 → 200 并落盘（云效老约定）")
+    void legacyTokenHeaderIsAccepted() throws Exception {
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN_LEGACY, TOKEN)
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(PAYLOAD))
+                .andExpect(status().isOk());
+
+        assertEquals(1, queueStore.countPending());
+        assertEquals(DELIVERY_ID, queueStore.listPending().get(0).getDeliveryId());
+    }
+
+    @Test
+    @DisplayName("两个头都带时以 X-Codeup-Token 为准：它错、老头对，仍要 403")
+    void primaryTokenWinsOverLegacyWhenBothPresent() throws Exception {
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN, "wrong-token")
+                        .header(HeaderNames.TOKEN_LEGACY, TOKEN)
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(PAYLOAD))
+                .andExpect(status().isForbidden());
+
+        assertEquals(0, queueStore.countPending(), "不能因为老头带对就放行，否则就是后门");
+    }
+
+    @Test
     @DisplayName("配置里 token 为空 → 一律拒绝（空密钥等于门没锁）")
     void emptyConfiguredTokenRejectsEverything() throws Exception {
         properties.setWebhookToken("");

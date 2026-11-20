@@ -15,6 +15,13 @@ public final class HeaderNames {
     /** 云效 Webhook 密钥，只用于监听服务自己验签，不往内网转发。 */
     public static final String TOKEN = "X-Codeup-Token";
 
+    /**
+     * 云效历史上还发过这个头（GitLab 的老约定）。合并项目的 WebhookGuard 两种都认，
+     * 监听服务必须跟着认：只认一个的话，一旦推送只带老头，每一条都会被 403 丢掉，
+     * 而日志看起来像密钥填错 —— 最难查的那类故障。
+     */
+    public static final String TOKEN_LEGACY = "X-Gitlab-Token";
+
     /** 报文类型，含 charset，转发时必须原样透传，否则中文会乱码。 */
     public static final String CONTENT_TYPE = "Content-Type";
 
