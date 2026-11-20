@@ -1,0 +1,13 @@
+target/
+logs/
+*.log
+.idea/
+*.iml
+
+# 队列目录：报文里有提交人姓名和邮箱，绝不入库
+queue/
+*.pid
+
+# 本地开发的真实配置，不入库。模板见 .env.example
+# 只忽略根目录那个 .env，不影响 .env.example
+/.env
