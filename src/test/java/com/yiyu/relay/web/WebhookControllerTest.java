@@ -6,18 +6,27 @@ import com.yiyu.relay.queue.QueueDirectories;
 import com.yiyu.relay.queue.QueueFile;
 import com.yiyu.relay.queue.QueueStore;
 import com.yiyu.relay.support.HeaderNames;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -40,6 +49,10 @@ class WebhookControllerTest {
     private QueueStore queueStore;
     private MockMvc mockMvc;
 
+    /** 挂在入口留档 logger 上的收集器，用来断言"每一条推送都留下了记录"。 */
+    private ListAppender<ILoggingEvent> inboundAppender;
+    private Logger inboundLogger;
+
     @BeforeEach
     void setUp() {
         properties = new RelayProperties();
@@ -50,6 +63,16 @@ class WebhookControllerTest {
         directories.init();
         queueStore = new QueueStore(directories, new MetaStore(directories));
         mockMvc = MockMvcBuilders.standaloneSetup(new WebhookController(properties, queueStore)).build();
+
+        inboundLogger = (Logger) LoggerFactory.getLogger("com.yiyu.relay.inbound");
+        inboundAppender = new ListAppender<>();
+        inboundAppender.start();
+        inboundLogger.addAppender(inboundAppender);
+    }
+
+    @AfterEach
+    void tearDown() {
+        inboundLogger.detachAppender(inboundAppender);
     }
 
     @Test
@@ -201,6 +224,60 @@ class WebhookControllerTest {
         assertEquals(queueStore.resolveDirectory(QueueStore.DIR_PENDING), file.getPath().getParent());
         assertEquals("------etc-passwd", file.getDeliveryId());
         assertNull(file.getDeadReason());
+    }
+
+    @Test
+    @DisplayName("验签失败也要留档：请求头 + 报文原文都在，密钥只露前 4 位")
+    void forbiddenRequestIsStillLogged() throws Exception {
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN, "wrong-token")
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(PAYLOAD))
+                .andExpect(status().isForbidden());
+
+        String logged = onlyInboundLog();
+        assertTrue(logged.contains("收到推送"), logged);
+        assertTrue(logged.contains("object_kind"), "密钥不对也必须留下报文原文：" + logged);
+        assertTrue(logged.contains("X-Codeup-Token=wron*******"), "密钥要留前 4 位再打码：" + logged);
+        assertFalse(logged.contains("wrong-token"), "密钥全文不能进日志：" + logged);
+    }
+
+    @Test
+    @DisplayName("正常入队同样留档：一条推送一条记录，含全部请求头和正文")
+    void acceptedRequestIsLogged() throws Exception {
+        sendAccepted();
+
+        String logged = onlyInboundLog();
+        assertTrue(logged.contains("收到推送"), logged);
+        assertTrue(logged.contains("X-Codeup-Delivery=" + DELIVERY_ID), logged);
+        assertTrue(logged.contains("bytes=" + PAYLOAD.length), logged);
+        assertTrue(logged.contains("object_kind"), logged);
+        assertTrue(logged.contains("X-Codeup-Token=test******"), logged);
+    }
+
+    @Test
+    @DisplayName("报文超限也留一条记录（写明声明了多少字节）")
+    void oversizedRequestIsStillLogged() throws Exception {
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN, TOKEN)
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(new byte[200]))
+                .andExpect(status().isPayloadTooLarge());
+
+        String logged = onlyInboundLog();
+        assertTrue(logged.contains("超限未读"), logged);
+        assertTrue(logged.contains("declaredBytes=200"), logged);
+    }
+
+    /** 取本次请求唯一的一条入口留档，顺带守住"一次推送只记一条，不重复"。 */
+    private String onlyInboundLog() {
+        List<String> messages = inboundAppender.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .collect(Collectors.toList());
+        assertEquals(1, messages.size(), "一次推送应当且只应当留一条入口记录：" + messages);
+        return messages.get(0);
     }
 
     private void sendAccepted() throws Exception {

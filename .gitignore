@@ -11,3 +11,9 @@ queue/
 # 本地开发的真实配置，不入库。模板见 .env.example
 # 只忽略根目录那个 .env，不影响 .env.example
 /.env
+
+# 服务器上的真实值（云效密钥 + 目标地址），不入库。模板见 deploy/.env.example
+deploy/.env
+
+# 构建产物不入库：deploy 下那份是拷过去方便启动的副本
+deploy/*.jar

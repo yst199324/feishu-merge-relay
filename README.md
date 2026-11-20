@@ -21,6 +21,8 @@
 - [九、它健康吗](#九它健康吗)
 - [十、死信怎么补发](#十死信怎么补发)
 - [十一、出问题了看哪里](#十一出问题了看哪里)
+  - [11.1 每一条推送都有一条原始记录](#111-每一条推送都有一条原始记录)
+  - [11.2 日志文件在哪](#112-日志文件在哪)
 - [十二、配置项完整说明](#十二配置项完整说明)
 - [十三、代码结构](#十三代码结构)
 - [十四、几条要知道的边界](#十四几条要知道的边界)
@@ -231,13 +233,15 @@ chmod 600 .env
 
 ### 6.3 `application.yml` 不用改
 
-从仓库里复制一份到 jar 同级即可：
+仓库的 `deploy/` 目录里已经放了一份，直接拷到 jar 同级：
 
 ```bash
-cp src/main/resources/application.yml /部署目录/relay/application.yml
+cp deploy/application.yml /部署目录/relay/application.yml
 ```
 
-里面没有真实值，改它也不会影响凭据。想改队列上限这类参数，改 `.env` 更省事（下次覆盖 yml 不会冲掉）。
+**为什么仓库里有两份一模一样的 `application.yml`**：jar 里那份是打进去的，`start.sh` 还要求 jar 同级有一份（它检查不到就直接退出）。两份内容必须逐字一致，改配置要一起改——忘了会有 `DeployConfigSyncTest` 直接报错，不用靠人记。
+
+两个文件里都没有真实值，改它也不会影响凭据。想改队列上限这类参数，改 `.env` 更省事（下次覆盖 yml 不会冲掉）。
 
 ---
 
@@ -247,13 +251,13 @@ cp src/main/resources/application.yml /部署目录/relay/application.yml
 
 ```
 /你的目录/relay/
-├── relay.jar
-├── application.yml
-├── .env
+├── relay.jar            # mvn package 出来的 target/relay.jar
+├── application.yml      # 从仓库 deploy/application.yml 拷
+├── .env                 # 从仓库 deploy/.env.example 拷一份改名，填真实值
 ├── start.sh
 ├── stop.sh
 ├── restart.sh
-└── requeue-dead.sh     # 死信补发工具，不参与启停
+└── requeue-dead.sh      # 死信补发工具，不参与启停
 ```
 
 第一次要加执行权限，之后只用三条命令：
@@ -397,6 +401,44 @@ for f in queue/dead/*_auth_*.json; do ./requeue-dead.sh "$f"; done
 
 **一条排查顺序**：云效那边是绿的吗 → 监听服务日志有没有落盘记录 → 有没有转发记录 → 转发返回什么码 → 合并项目那边收到没有。四步就能定位是哪一段的问题。
 
+### 11.1 每一条推送都有一条原始记录
+
+不管后面回 200 还是 403，**只要请求进到了这个服务，就会先留一条记录**（日志类名 `com.yiyu.relay.inbound`）：
+
+```
+收到推送 from=10.1.2.3 realIp=10.1.2.3 POST /webhook/yunxiao
+  headers={Host=..., X-Codeup-Token=9f1c********, X-Codeup-Delivery=a1b2c3d4-0001,
+           X-Codeup-Event=merge_request, Content-Type=application/json;charset=UTF-8}
+  bytes=1583
+  body={"object_kind":"merge_request","object_attributes":{"iid":42,"title":"修复登录抖动",...}}
+```
+
+（真实日志是一整行，这里为了看清楚才拆开。）
+
+- **记录在验签之前**。密钥填错、网关把请求头滤掉、有人拿扫描器敲门，这三种情况以前只在日志里留一个来源 IP，报文内容一个字都没有，事后完全没法查。现在不管回什么码，原文都在。
+- **密钥只露前 4 位，后面每个字符换成一个 `*`**。留前 4 位是为了能比对——"两次推送是不是同一个密钥""我配的和云效那个是不是同一个"，全打掉就没法比；星号个数等于真实长度，少粘一位、末尾多个换行这类错一眼能看出来。
+- **报文正文原样打**，但 JSON 里名字带 `token` / `secret` / `password` / `sign` 的字段会打码。正文里的换行会转义成 `\n`，保证一条消息只占一行（不然 grep 会断在半截）。
+- **超过 32KB 的报文截断**，末尾写"已截断，原文 N 字节"。云效的合并请求报文通常几 KB，正常都完整。
+- **超过 2MB 上限的不读**，只留一条"超限未读"，带请求头和声明了多少字节。
+
+只看这些记录：
+
+```bash
+grep -a "com.yiyu.relay.inbound" logs/relay-info.log
+```
+
+### 11.2 日志文件在哪
+
+`logs/` 下三个文件，按级别分开写：
+
+| 文件 | 里面是什么 |
+|---|---|
+| `relay-info.log` | 日常全在这：推送原文、入队、转发成功、重试调度 |
+| `relay-warn.log` | 转发失败、进重试、消息超龄 |
+| `relay-error.log` | 死信、落盘失败、内部入口没开、凭据失效 |
+
+按天滚动、历史压 gz、留 30 天。**写入是异步的**：队列满了会丢最新几条，保证业务线程不被日志拖住。所以"消息不丢"这件事不靠日志保证，靠磁盘上 `queue/` 里的报文文件——日志是给人看的，文件才是事实。
+
 ---
 
 ## 十二、配置项完整说明
@@ -462,7 +504,12 @@ src/main/java/com/yiyu/relay/
     ├── TargetProbe.java         启动时探一次目标地址，404 直接报错
     ├── RelayStats.java          最近转发结果 / 连续失败次数 / 最后成功时间
     ├── DeliveryIds.java         投递编号清洗（防目录穿越）
-    └── HeaderNames.java         请求头常量（X-Codeup-Delivery 这个名字不能改）
+    ├── HeaderNames.java         请求头常量（X-Codeup-Delivery 这个名字不能改）
+    ├── InboundLog.java          入口留档：请求头 + 报文原文，验签之前就记
+    ├── Secrets.java             敏感信息打码（留前 4 位 + 星号）
+    ├── HeaderDumper.java        请求头拼成一行（密钥按名字打码）
+    ├── BodyDumper.java          报文压成一行（敏感字段打码、换行转义、超长截断）
+    └── Payloads.java            带上限地读请求体
 ```
 
 **读代码的顺序建议**：`QueueFileName`（文件名就是全部状态，看懂它就看懂一半）→ `QueueStore` → `WebhookController`（入口）→ `AbstractWorker` 和两个 Worker（消费）→ `RelayClient` + `StatusCodePolicy`（返回码怎么归类）。
@@ -477,7 +524,8 @@ src/main/java/com/yiyu/relay/
 - **不校验报文内容。** 它不懂云效报文结构，只认三个请求头。报文是不是合法、是不是合并请求事件，都是合并项目判断的。
 - **绑死了云效。** 判重、转发的请求头都用云效的约定。将来换平台要改的只有这一个项目——这正是把它独立出来的原因，改这里不会碰到合并项目里的云效调用、飞书卡片、审批流程。
 - **依赖本地磁盘。** 磁盘写不进去时返回 500，让云效看到投递失败——这是唯一正确的行为，不能假装成功。
-- **报文里有个人信息（提交人姓名、邮箱）。** 所以队列目录权限 `700`、文件 `600`，死信只留 7 天。
+- **报文里有个人信息（提交人姓名、邮箱），日志里也有。** 队列目录权限 `700`、文件 `600`，死信只留 7 天；日志每天滚动、留 30 天，同一套权限。别把这些日志往外发或贴进公开群。
+- **日志是异步写的，极端情况下会缺几条。** 日志队列满了会丢最新的几条，换来的是业务线程不被磁盘 IO 拖住。所以"消息有没有丢"要看 `queue/` 里的文件，不要只看日志——两者不一致时，以文件为准。
 
 ---
 

@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------
+# 这份文件进仓库，所以里面只放占位值。
+#
+# 真实值统一写在 jar 同级目录的 .env 里（该文件不进仓库）。
+# ${KEY:默认值} 这种写法：.env 里有这一项就用它的值，没有就回落默认值。
+# 所以没有 .env 也能启动，只是必填项会用占位值（启动日志会提示）。
+#
+# 为什么必须这么写：服务器上这份 yml 是从仓库整份覆盖过去的，
+# 写死字面值会把服务器 .env 里的真实值盖掉 —— 合并项目上一轮就踩过这个坑。
+# ---------------------------------------------------------------
+spring:
+  config:
+    # 把工作目录下的 .env 按 properties 格式读进来。
+    # [.properties] 不能省（.env 没有扩展名，Spring 猜不出解析器）；
+    # optional: 不能省（文件缺失时回落默认值，不报错）。
+    # 注意：./ 是相对**进程工作目录**的，所以 start.sh 里必须先 cd 到 jar 目录。
+    import: optional:file:./.env[.properties]
+
+server:
+  port: ${RELAY_SERVER_PORT:18123}
+
+relay:
+  # 云效 Webhook 的 Secret Token，必须和云效后台、合并项目 .env 里那个完全一致。真实值放 .env
+  webhook-token: "${YUNXIAO_WEBHOOK_TOKEN:在这里填云效后台的密钥}"
+
+  # 报文最大字节数，超过直接 413，不落盘（防止超大报文写满磁盘）
+  max-payload-bytes: 2097152        # 2 MB
+
+  # 队列根目录，下面自动建 pending / retry / dead 三个子目录
+  queue-dir: ${RELAY_QUEUE_DIR:./queue}
+
+  # 扫描间隔（毫秒）。消费线程、清理线程都用这个节奏
+  scan-interval-ms: 2000
+
+  # 消息总寿命：从"云效推过来那一刻"算起，pending/ 和 retry/ 共用同一个阈值。
+  # ⚠️ 必须大于重试阶梯累计时长（5+30+120+300+1800+7200 = 9455 秒 ≈ 2h38m），
+  #    否则最后一档 2 小时重试还没跑到，消息就已经被判超龄进死信了。
+  #    改 retry.delay-seconds 时务必回来检查这个值。
+  max-age-minutes: ${RELAY_MAX_AGE_MINUTES:180}    # 3 小时
+
+  # 待发队列
+  pending:
+    max-size: ${RELAY_PENDING_MAX_SIZE:50}
+    batch-per-round: 10             # 每轮最多处理几条
+
+  # 重试队列
+  retry:
+    max-size: ${RELAY_RETRY_MAX_SIZE:50}
+    batch-per-round: 5
+    # 待发积压超过这个数，重试线程本轮跳过，把额度留给新消息。
+    # ⚠️ 必须小于 pending.max-size，否则这条规则永远不触发。
+    max-pending-before-yield: 10
+    # 每个条目是一次重试前的等待秒数，条目数 = 重试次数。
+    # 5 秒 → 30 秒 → 2 分 → 5 分 → 30 分 → 2 小时
+    delay-seconds: [5, 30, 120, 300, 1800, 7200]
+
+  # 死信目录
+  dead:
+    max-size: 500
+    max-age-days: ${RELAY_DEAD_MAX_AGE_DAYS:7}   # 按进死信时间清，过期直接删文件
+
+  # 转发目标（合并项目的内部入口）
+  target:
+    url: "${RELAY_TARGET_URL:http://127.0.0.1:18601/internal/yunxiao}"
+    connect-timeout-ms: 3000
+    # 等响应超时。合并项目同步处理一条要串行调最多 3 次云效接口（每次"连接 5s + 读 20s"上限）
+    # 再发一次飞书卡片，最坏约 85 秒 —— 所以默认给 120 秒，不是 30 秒。
+    # 设短了会出现"它其实成功了、我们判成失败"→ 重投 → 靠投递编号去重挡住，但会白占一次重试名额。
+    # 调大只影响"判定失败"的早晚，不影响正确性。要改写在 .env 里（yml 会被整份覆盖）。
+    read-timeout-ms: ${RELAY_TARGET_READ_TIMEOUT_MS:120000}
+    threads: 1                      # 待发组线程数，默认 1（保序）；调大后不保序
+
+logging:
+  level:
+    com.yiyu.relay: INFO

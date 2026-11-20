@@ -4,8 +4,8 @@ import com.yiyu.relay.config.RelayProperties;
 import com.yiyu.relay.queue.InboundMessage;
 import com.yiyu.relay.queue.QueueStore;
 import com.yiyu.relay.support.DeliveryIds;
-import com.yiyu.relay.support.HeaderDumper;
 import com.yiyu.relay.support.HeaderNames;
+import com.yiyu.relay.support.InboundLog;
 import com.yiyu.relay.support.PayloadTooLargeException;
 import com.yiyu.relay.support.Payloads;
 import org.slf4j.Logger;
@@ -14,7 +14,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.http.server.ServletServerHttpRequest;
 
 import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
@@ -24,8 +23,10 @@ import java.security.MessageDigest;
 /**
  * 接住云效推送（设计文档 6.1）。
  *
- * <p>只做四件检查再交给队列：密钥对不对、报文是不是太大、有没有带投递编号、
- * 这条是不是已经收过。不解析报文、不校验业务含义 —— 那是合并项目的事。</p>
+ * <p>顺序是刻意安排的：**先把报文读下来并留档，再验签**。反过来的话，密钥填错、
+ * 网关滤掉请求头、扫描器敲门这三种情况，报文内容一个字都不会留下，事后只能对着
+ * 一行"来源 IP"猜。代价是未验签的请求也会被读进内存，但读取有硬上限
+ * （{@code max-payload-bytes}），读超了就中断，撑不爆。</p>
  *
  * <p>返回码是给云效看的唯一反馈，每一种都必须准确：</p>
  * <ul>
@@ -60,40 +61,45 @@ public class WebhookController {
      */
     @PostMapping(PATH)
     public ResponseEntity<String> receive(HttpServletRequest request) {
-        if (!tokenMatches(request)) {
-            // 两个头都写过，运维才知道不用只盯着 X-Codeup-Token 查
-            log.warn("云效推送被拒绝：{} 和 {} 两个头都试过了（优先前者），没带或都不匹配配置的密钥（来源 {}）",
-                    HeaderNames.TOKEN, HeaderNames.TOKEN_LEGACY, request.getRemoteAddr());
-            return respond(HttpStatus.FORBIDDEN, "token 不匹配");
-        }
-        String rawDeliveryId = request.getHeader(HeaderNames.DELIVERY);
-        if (DeliveryIds.isBlank(rawDeliveryId)) {
-            return rejectMissingDelivery(request);
-        }
-        String deliveryId = DeliveryIds.sanitize(rawDeliveryId);
-        if (DeliveryIds.isBlank(deliveryId)) {
-            return rejectMissingDelivery(request);
-        }
-        return enqueue(request, deliveryId);
-    }
-
-    /** 校验时报文大小，超限直接 413，连读都不读。 */
-    private ResponseEntity<String> enqueue(HttpServletRequest request, String deliveryId) {
         long maxPayloadBytes = properties.getMaxPayloadBytes();
-        if (request.getContentLengthLong() > maxPayloadBytes) {
-            log.error("报文超限，拒绝落盘：编号 {}，声明长度 {} 字节，上限 {} 字节",
-                    deliveryId, request.getContentLengthLong(), maxPayloadBytes);
+        long declaredBytes = request.getContentLengthLong();
+        // 声明就超限的连读都不读（防一个几 GB 的报文把堆和磁盘占满）
+        if (declaredBytes > maxPayloadBytes) {
+            InboundLog.tooLarge(request, declaredBytes, maxPayloadBytes);
+            log.error("报文超限，拒绝落盘：声明 {} 字节，上限 {} 字节", declaredBytes, maxPayloadBytes);
             return respond(HttpStatus.PAYLOAD_TOO_LARGE, "报文超过上限");
         }
+
         byte[] payload;
         try {
             payload = Payloads.read(request.getInputStream(), maxPayloadBytes);
         } catch (PayloadTooLargeException e) {
-            log.error("报文超限，拒绝落盘：编号 {}，上限 {} 字节", deliveryId, e.getMaxBytes());
+            // 声明长度在限额内、实际读数超了：分块传输，或者头里写了个假长度
+            InboundLog.tooLarge(request, declaredBytes, e.getMaxBytes());
+            log.error("报文超限，拒绝落盘：上限 {} 字节", e.getMaxBytes());
             return respond(HttpStatus.PAYLOAD_TOO_LARGE, "报文超过上限");
         } catch (IOException e) {
-            log.error("读取报文失败，按投递失败返回 500：编号 {}（{}）", deliveryId, e.getMessage());
+            log.error("读取报文失败，按投递失败返回 500（{}）", e.getMessage());
             return respond(HttpStatus.INTERNAL_SERVER_ERROR, "读取报文失败");
+        }
+
+        // 留档在验签之前：这一条之后无论回什么码，请求头和报文原文都已经在日志里了
+        InboundLog.received(request, payload);
+
+        if (!tokenMatches(request)) {
+            log.warn("云效推送被拒绝：{} 和 {} 两个头都试过了（优先前者），没带或都不匹配配置的密钥（来源 {}）",
+                    HeaderNames.TOKEN, HeaderNames.TOKEN_LEGACY, request.getRemoteAddr());
+            return respond(HttpStatus.FORBIDDEN, "token 不匹配");
+        }
+        return dispatch(payload, request);
+    }
+
+    /** 取投递编号并落盘。缺编号不落盘，也绝不用空编号入队。 */
+    private ResponseEntity<String> dispatch(byte[] payload, HttpServletRequest request) {
+        String rawDeliveryId = request.getHeader(HeaderNames.DELIVERY);
+        String deliveryId = DeliveryIds.sanitize(rawDeliveryId);
+        if (DeliveryIds.isBlank(deliveryId)) {
+            return rejectMissingDelivery(rawDeliveryId);
         }
         return store(payload, deliveryId, request);
     }
@@ -126,13 +132,17 @@ public class WebhookController {
         return respond(HttpStatus.OK, "已入队");
     }
 
-    /** 缺投递编号：400 + 把收到的请求头打出来（脱敏），不落盘、不入队。 */
-    private ResponseEntity<String> rejectMissingDelivery(HttpServletRequest request) {
-        String headers = HeaderDumper.dump(new ServletServerHttpRequest(request).getHeaders());
-        log.error("云效推送缺少 {}，不落盘。收到的请求头：{}。"
+    /**
+     * 缺投递编号：400，不落盘。
+     *
+     * <p>请求头和报文正文已经由 {@link InboundLog} 记过了，这里只补排查方向 ——
+     * 十次有九次是中间的 Nginx 把未声明的请求头滤掉了。</p>
+     */
+    private ResponseEntity<String> rejectMissingDelivery(String rawDeliveryId) {
+        log.error("云效推送缺少 {}，不落盘。收到的原始值={}。"
                         + "若云效后台显示已发出，多半是中间的 Nginx / 防火墙把未声明的请求头滤掉了，"
                         + "检查 proxy_set_header 是否透传未知头",
-                HeaderNames.DELIVERY, headers);
+                HeaderNames.DELIVERY, rawDeliveryId);
         return respond(HttpStatus.BAD_REQUEST, "缺少 " + HeaderNames.DELIVERY);
     }
 

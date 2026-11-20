@@ -2,19 +2,21 @@ package com.yiyu.relay.support;
 
 import org.springframework.http.HttpHeaders;
 
-import java.util.Locale;
-
 /**
- * 请求头脱敏打印工具。
+ * 把请求头拼成一行打印。
  *
- * <p>设计文档 6.1 要求"缺 X-Codeup-Delivery 时把请求头全量打出来"，但请求头里
- * 就躺着 {@code X-Codeup-Token} 本身。全量打印等于把密钥写进日志文件，
- * 所以这里按名字把它打码 —— 排查网关问题时只看"有没有这个头"就够了，不需要值。</p>
+ * <p>请求头里躺着 {@link HeaderNames#TOKEN} 本身，全量打印等于把密钥写进日志文件，
+ * 所以按名字交给 {@link Secrets} 打码（留前 4 位明文，方便比对是不是同一个密钥）。</p>
+ *
+ * <p>非敏感的值只截到 {@link #MAX_VALUE_LENGTH} 个字符 —— 请求头本身不该有长内容，
+ * 真有就是有人在往头里塞报文，截断避免把一行日志撑成几兆。</p>
+ *
+ * <p>设计文档 6.1：缺 {@code X-Codeup-Delivery} 时要能看到完整的头，
+ * 排查网关是不是把未声明的头滤掉了。</p>
  */
 public final class HeaderDumper {
 
-    private static final String[] SENSITIVE_KEYWORDS = {"token", "secret", "authorization", "signature", "password"};
-    private static final String MASK = "***(已脱敏)";
+    /** 单个非敏感头最多打印这么多个字符。 */
     private static final int MAX_VALUE_LENGTH = 200;
 
     private HeaderDumper() {
@@ -22,13 +24,13 @@ public final class HeaderDumper {
     }
 
     /**
-     * 把请求头拼成一行，敏感的只留名字。
+     * 把请求头拼成一行。
      *
-     * @param headers 请求头
-     * @return 形如 {@code {host=127.0.0.1, x-codeup-token=***(已脱敏)}} 的描述，不会为 null
+     * @param headers 请求头，可为 null
+     * @return 形如 {@code {Host=127.0.0.1, X-Codeup-Token=9f1c********}} 的描述，不会为 null
      */
     public static String dump(HttpHeaders headers) {
-        if (headers == null) {
+        if (headers == null || headers.isEmpty()) {
             return "{}";
         }
         StringBuilder text = new StringBuilder("{");
@@ -44,26 +46,14 @@ public final class HeaderDumper {
     }
 
     private static String valueOf(String name, String value) {
-        return isSensitive(name) ? MASK : truncate(value);
-    }
-
-    private static boolean isSensitive(String name) {
-        if (name == null) {
-            return false;
+        if (Secrets.isSensitiveName(name)) {
+            return Secrets.mask(value);
         }
-        String lower = name.toLowerCase(Locale.ROOT);
-        for (String keyword : SENSITIVE_KEYWORDS) {
-            if (lower.contains(keyword)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static String truncate(String value) {
         if (value == null) {
             return "";
         }
-        return value.length() <= MAX_VALUE_LENGTH ? value : value.substring(0, MAX_VALUE_LENGTH) + "...";
+        return value.length() <= MAX_VALUE_LENGTH
+                ? value
+                : value.substring(0, MAX_VALUE_LENGTH) + "...";
     }
 }
