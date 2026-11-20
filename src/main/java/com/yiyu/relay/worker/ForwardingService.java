@@ -7,6 +7,7 @@ import com.yiyu.relay.client.RelayTarget;
 import com.yiyu.relay.queue.MessageMeta;
 import com.yiyu.relay.queue.QueueFile;
 import com.yiyu.relay.queue.QueueStore;
+import com.yiyu.relay.support.InFlightDetector;
 import com.yiyu.relay.support.RelayStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,6 +79,13 @@ public class ForwardingService {
         if (result.getOutcome() == ForwardOutcome.ENDPOINT_MISSING) {
             log.error("{}：{}（编号 {}，{}）",
                     ENDPOINT_MISSING_HINT, file.fileName(), file.getDeliveryId(), result.describe());
+            return;
+        }
+        if (InFlightDetector.isInFlight(result)) {
+            // 和普通 503 分开打：这是"下游正在干活，让我等"，不是"下游坏了"。
+            // 处理动作完全相同（进重试队列、文件保留），只是排查方向不一样。
+            log.info("合并项目正在处理同一条投递（IN_FLIGHT），按阶梯稍后重试：{}（编号 {}，{}）",
+                    file.fileName(), file.getDeliveryId(), result.describe());
             return;
         }
         log.warn("转发失败：{}（编号 {}，{} 字节，{}）",
