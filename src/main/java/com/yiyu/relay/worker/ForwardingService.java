@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 
 /**
  * 一次"读报文 → 转发 → 记统计 → 写日志"的完整动作。
@@ -56,6 +57,13 @@ public class ForwardingService {
         byte[] payload;
         try {
             payload = queueStore.readPayload(file);
+        } catch (NoSuchFileException e) {
+            // 扫描之后、读文件之前这个文件没了：另一个分区线程已经处理完，或者清理线程
+            // 按限额把它丢了。不能当"可重试失败"——那会把一个不存在的路径再搬进 retry，
+            // moveToRetry 必然失败，只剩一串没意义的报错；按完成处理才是准确的，
+            // 收尾删一个不存在的文件本来就是空操作。
+            log.info("报文文件已不存在，跳过：{}（编号 {}）", file.fileName(), file.getDeliveryId());
+            return ForwardResult.success(ForwardResult.NO_STATUS, "文件已被处理，跳过");
         } catch (IOException e) {
             log.error("读取报文失败，本轮按可重试处理：{}（编号 {}，{}）",
                     file.fileName(), file.getDeliveryId(), e.getMessage());

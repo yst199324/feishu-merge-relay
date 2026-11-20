@@ -257,6 +257,39 @@ class WebhookControllerTest {
     }
 
     @Test
+    @DisplayName("报文正文原样入日志：连里面的 token 字段也不打码，否则拿不到原文就没法重放")
+    void bodyIsLoggedVerbatim() throws Exception {
+        String body = "{\"object_kind\":\"merge_request\",\"access_token\":\"abcd1234\"}";
+
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN, TOKEN)
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(body.getBytes(StandardCharsets.UTF_8)))
+                .andExpect(status().isOk());
+
+        String logged = onlyInboundLog();
+        assertTrue(logged.contains("\"access_token\":\"abcd1234\""),
+                "正文必须逐字保留（只有请求头才打码）：" + logged);
+    }
+
+    @Test
+    @DisplayName("密钥仍是 yml 占位值时连占位值本身也不认：忘配 .env 就全部拒绝，而不是放行一个公开默认值")
+    void placeholderTokenIsNotAccepted() throws Exception {
+        String placeholder = RelayProperties.PLACEHOLDER_MARK + "云效后台的密钥";
+        properties.setWebhookToken(placeholder);
+
+        mockMvc.perform(post(WebhookController.PATH)
+                        .header(HeaderNames.TOKEN, placeholder)
+                        .header(HeaderNames.DELIVERY, DELIVERY_ID)
+                        .contentType("application/json")
+                        .content(PAYLOAD))
+                .andExpect(status().isForbidden());
+
+        assertEquals(0, queueStore.countPending(), "占位值不算配过密钥");
+    }
+
+    @Test
     @DisplayName("报文超限也留一条记录（写明声明了多少字节）")
     void oversizedRequestIsStillLogged() throws Exception {
         mockMvc.perform(post(WebhookController.PATH)

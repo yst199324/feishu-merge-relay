@@ -14,9 +14,8 @@ import java.util.Locale;
  * <p>星号个数跟真实长度一致（最多 32 个），所以长度的差异也能一眼看出来 ——
  * 密钥末尾多粘了一个换行、少粘了一位，这类错最常见。</p>
  *
- * <p>注意这里的关键字表只用于**请求头名**。报文 JSON 里的键名是另一套规则
- * （{@link BodyDumper}），因为头名习惯写 {@code Authorization}、{@code X-XX-Signature}，
- * 而 JSON 里更常见的是 {@code access_token}、{@code sign}。两套不合并是故意的。</p>
+ * <p>只用于**请求头名**。报文正文（{@link BodyDumper}）刻意不打码 ——
+ * 正文改过就重放不了，出问题时唯一的复现手段就没了。</p>
  */
 public final class Secrets {
 

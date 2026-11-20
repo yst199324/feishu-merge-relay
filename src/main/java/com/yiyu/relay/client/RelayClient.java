@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Proxy;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -109,12 +110,14 @@ public class RelayClient implements RelayTarget {
 
     private HttpURLConnection openConnection() throws IOException {
         URL url = new URL(properties.getTarget().getUrl());
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        // 内部入口是机器对机器（默认就是 127.0.0.1），不该被 JVM 的 http.proxyHost
+        // 或环境里的代理设置带偏 —— 走了代理会连到"代理那台机器"的 127.0.0.1，报连接失败，
+        // 而日志看起来像合并项目没起来。setUseCaches(false) 跟代理无关，别拿它顶。
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection(Proxy.NO_PROXY);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         connection.setConnectTimeout(properties.getTarget().getConnectTimeoutMs());
         connection.setReadTimeout(properties.getTarget().getReadTimeoutMs());
-        // 内部入口是机器对机器，不跟代理打交道，避免环境里的 HTTP_PROXY 把请求带偏
         connection.setUseCaches(false);
         return connection;
     }

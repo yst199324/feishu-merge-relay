@@ -21,6 +21,9 @@ public class RelayProperties {
     public static final List<Long> DEFAULT_DELAY_SECONDS =
             Arrays.asList(5L, 30L, 120L, 300L, 1800L, 7200L);
 
+    /** yml 里没配 .env 时留下的占位文字，用来识别"忘了改"。 */
+    public static final String PLACEHOLDER_MARK = "在这里填";
+
     /** 云效 Webhook 密钥。占位值只用于"没配也要能起来"的本地开发。 */
     private String webhookToken = "在这里填云效后台的密钥";
 
@@ -47,6 +50,21 @@ public class RelayProperties {
 
     public void setWebhookToken(String webhookToken) {
         this.webhookToken = webhookToken;
+    }
+
+    /**
+     * 密钥能不能用来验签。
+     *
+     * <p>占位值也算"不能用"：yml 里那句"在这里填云效后台的密钥"是给人看的提示，
+     * 一旦被当成真密钥去比对，就等于有人知道这句话就能推消息进来（fail-open）。
+     * 忘了配 .env 时应该"全部拒绝"，而不是"全部放行一个谁都看得见的默认值"。</p>
+     *
+     * @return true 表示已填了真实密钥
+     */
+    public boolean hasUsableWebhookToken() {
+        return webhookToken != null
+                && !webhookToken.trim().isEmpty()
+                && !webhookToken.contains(PLACEHOLDER_MARK);
     }
 
     public long getMaxPayloadBytes() {

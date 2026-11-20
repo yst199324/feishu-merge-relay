@@ -1,37 +1,32 @@
 package com.yiyu.relay.support;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 把报文正文压成一行日志。
  *
- * <p>三件事，顺序不能换：</p>
+ * <p><b>正文原样打印，不做脱敏</b>。理由：出问题时唯一的复现手段是拿原文重放一次，
+ * 报文被改过（哪怕只是打掉几个字段）就重放不了了。正文里出现的密钥是自己的，
+ * 需要时补上即可；日志文件本身已是 700/600 权限、只留 30 天。</p>
+ *
+ * <p>只做两件事：</p>
  * <ol>
- *   <li><b>先给 JSON 里的敏感字段打码</b>。先打码再截断，才不会出现"截断正好把一个密钥
- *       切成两半、后半截漏出去"。</li>
- *   <li><b>再压成一行</b>：把回车换行转义成 {@code \n} 的字面形式。云效报文是压过一行的
+ *   <li><b>压成一行</b>：把回车换行转义成 {@code \n} 的字面形式。云效报文是压过一行的
  *       JSON，但不保证 —— 真出现换行时，一条日志会被拆成好几行，按关键词 grep 就会断在
  *       中间，而那正是最需要完整上下文的时候。</li>
- *   <li><b>最后按长度截断</b>，并在末尾注明原文多少字节，避免有人以为报文就这么长。</li>
+ *   <li><b>按长度截断</b>，并在末尾注明原文多少字节。日志行不是报文存储，
+ *       完整原文在 {@code queue/} 下的 json 文件里，那才是重放要用的东西。</li>
  * </ol>
  */
 public final class BodyDumper {
 
-    /** 日志里最多放这么多个字符。云效的合并请求报文通常几 KB，能完整放下。 */
-    public static final int MAX_CHARS = 32768;
-
     /**
-     * 抓出所有"字符串键 : 字符串值"。
+     * 日志里最多放这么多个字符。
      *
-     * <p>用一条通用正则抓，再用 {@link #isSecretKey} 判断这个键要不要打码 ——
-     * 而不是把关键字写进正则里。原因：写进正则时 {@code assignee}（审批人）
-     * 会因为含有 "sign" 被误判成密钥字段，把审批人姓名糊掉，排查时反而看不到关键信息。</p>
+     * <p>云效的合并请求报文通常几 KB，正常都能完整放下；超过这个量基本是有人在往
+     * 这个端口塞别的东西，压行只会白占日志盘。</p>
      */
-    private static final Pattern JSON_STRING_FIELD = Pattern.compile(
-            "(\"([A-Za-z0-9_-]+)\"\\s*:\\s*)\"((?:[^\"\\\\]|\\\\.)*)\"");
+    public static final int MAX_CHARS = 32768;
 
     private BodyDumper() {
         // 工具类，不实例化
@@ -47,51 +42,12 @@ public final class BodyDumper {
         if (payload == null || payload.length == 0) {
             return "(空报文)";
         }
-        String text = new String(payload, StandardCharsets.UTF_8);
-        String masked = maskJsonSecrets(text);
-        String oneLine = toOneLine(masked);
+        String oneLine = toOneLine(new String(payload, StandardCharsets.UTF_8));
         if (oneLine.length() <= MAX_CHARS) {
             return oneLine;
         }
         return oneLine.substring(0, MAX_CHARS)
-                + "...(已截断，原文 " + payload.length + " 字节)";
-    }
-
-    /**
-     * 这个 JSON 键是不是密钥类字段。
-     *
-     * @param key 键名，如 {@code access_token}、{@code sign}、{@code assignee}
-     * @return true 表示它的值要打码
-     */
-    static boolean isSecretKey(String key) {
-        if (key == null || key.isEmpty()) {
-            return false;
-        }
-        String lower = key.toLowerCase(Locale.ROOT);
-        if (lower.contains("token") || lower.contains("secret") || lower.contains("password")
-                || lower.contains("passwd") || lower.contains("credential") || lower.contains("signature")) {
-            return true;
-        }
-        // sign 必须是一个完整的词：sign / _sign / -sign。
-        // 只是包含 "sign" 不算 —— assignee、design、signature 里都有它。
-        return lower.equals("sign") || lower.endsWith("_sign") || lower.endsWith("-sign");
-    }
-
-    /** 把 JSON 里敏感键的值换成打码后的值，其余原样。 */
-    private static String maskJsonSecrets(String text) {
-        Matcher matcher = JSON_STRING_FIELD.matcher(text);
-        StringBuffer out = new StringBuffer(text.length());
-        while (matcher.find()) {
-            String replacement;
-            if (isSecretKey(matcher.group(2))) {
-                replacement = matcher.group(1) + '"' + Secrets.mask(matcher.group(3)) + '"';
-            } else {
-                replacement = matcher.group(0);
-            }
-            matcher.appendReplacement(out, Matcher.quoteReplacement(replacement));
-        }
-        matcher.appendTail(out);
-        return out.toString();
+                + "...(日志截断，原文 " + payload.length + " 字节，完整原文在 queue 目录的文件里)";
     }
 
     /** 换行、制表符转义成字面形式，保证一条消息只占一行。 */

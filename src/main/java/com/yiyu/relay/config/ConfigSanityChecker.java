@@ -24,9 +24,6 @@ public class ConfigSanityChecker {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigSanityChecker.class);
 
-    /** 占位值里出现的字样，用来识别"忘了改 .env"。 */
-    private static final String PLACEHOLDER_MARK = "在这里填";
-
     /** 读超时低于这个值就该警告：合并项目最坏链路约 85 秒，30 秒只是"能跑但会误判"的下限。 */
     private static final int MIN_SAFE_READ_TIMEOUT_MS = 30000;
 
@@ -53,7 +50,7 @@ public class ConfigSanityChecker {
             log.error("relay.webhook-token 为空：所有云效推送都会被 403 拒绝。请检查 .env 里的 YUNXIAO_WEBHOOK_TOKEN");
             return;
         }
-        if (token.contains(PLACEHOLDER_MARK)) {
+        if (token.contains(RelayProperties.PLACEHOLDER_MARK)) {
             log.error("relay.webhook-token 仍是占位值：所有云效推送都会被 403 拒绝。请检查 .env 里的 YUNXIAO_WEBHOOK_TOKEN");
         }
     }

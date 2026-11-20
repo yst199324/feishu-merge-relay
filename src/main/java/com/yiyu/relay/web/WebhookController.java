@@ -2,6 +2,7 @@ package com.yiyu.relay.web;
 
 import com.yiyu.relay.config.RelayProperties;
 import com.yiyu.relay.queue.InboundMessage;
+import com.yiyu.relay.queue.QueueFile;
 import com.yiyu.relay.queue.QueueStore;
 import com.yiyu.relay.support.DeliveryIds;
 import com.yiyu.relay.support.HeaderNames;
@@ -120,15 +121,17 @@ public class WebhookController {
                 payload,
                 System.currentTimeMillis());
         try {
-            queueStore.enqueue(message);
+            QueueFile queued = queueStore.enqueue(message);
+            // 文件路径要打出来：出问题时"重放一次"就是拿这个文件直接 curl 内部入口，
+            // 不用去目录里翻，也避免翻到事后被别的消息顶替。
+            log.info("已入队：编号 {}，事件 {}，{} 字节，文件 {}",
+                    deliveryId, request.getHeader(HeaderNames.EVENT), payload.length, queued.getPath());
         } catch (IOException e) {
             // 不能假装成功：假装成功等于消息彻底消失（云效不会再投）
             log.error("落盘失败，返回 500 让云效看到投递失败：编号 {}，{} 字节（{}）",
                     deliveryId, payload.length, e.getMessage());
             return respond(HttpStatus.INTERNAL_SERVER_ERROR, "落盘失败");
         }
-        log.info("已入队：编号 {}，事件 {}，{} 字节",
-                deliveryId, request.getHeader(HeaderNames.EVENT), payload.length);
         return respond(HttpStatus.OK, "已入队");
     }
 
@@ -147,18 +150,18 @@ public class WebhookController {
     }
 
     /**
-     * 校验密钥。配置为空时一律拒绝 —— 空密钥等于门没锁，
+     * 校验密钥。密钥为空、或还是 yml 里的占位文字时一律拒绝 —— 那两种情况等于门没锁，
      * 任何人都能 POST 进来让合并项目发卡片。
      *
      * <p>请求里的密钥由 {@link #resolveToken} 按优先级取值：云效历史上发过两种头，
      * 合并项目的 WebhookGuard 两种都认，这里必须跟着认。</p>
      */
     private boolean tokenMatches(HttpServletRequest request) {
-        String expected = properties.getWebhookToken();
-        if (DeliveryIds.isBlank(expected)) {
-            log.error("relay.webhook-token 未配置，拒绝所有云效推送。请在 .env 里设置 YUNXIAO_WEBHOOK_TOKEN");
+        if (!properties.hasUsableWebhookToken()) {
+            log.error("relay.webhook-token 为空或仍是占位值，拒绝所有云效推送。请在 .env 里设置 YUNXIAO_WEBHOOK_TOKEN");
             return false;
         }
+        String expected = properties.getWebhookToken();
         String provided = resolveToken(request);
         if (provided == null) {
             return false;

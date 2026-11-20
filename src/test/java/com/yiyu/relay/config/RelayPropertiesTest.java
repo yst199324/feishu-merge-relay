@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -57,6 +58,24 @@ class RelayPropertiesTest {
         RelayProperties properties = new RelayProperties();
         assertTrue(properties.getRetry().getMaxPendingBeforeYield()
                 < properties.getPending().getMaxSize());
+    }
+
+    @Test
+    @DisplayName("密钥可用性：空值和 yml 占位值都算没配，必须 fail-closed")
+    void webhookTokenUsability() {
+        RelayProperties properties = new RelayProperties();
+        // 默认值就是 yml 里那句提示，不能当成真密钥
+        assertTrue(properties.getWebhookToken().contains(RelayProperties.PLACEHOLDER_MARK));
+        assertFalse(properties.hasUsableWebhookToken(), "占位值不能通过验签");
+
+        properties.setWebhookToken("");
+        assertFalse(properties.hasUsableWebhookToken(), "空密钥不能通过验签");
+
+        properties.setWebhookToken("  ");
+        assertFalse(properties.hasUsableWebhookToken(), "全空格不能通过验签");
+
+        properties.setWebhookToken("9f1c2f4e8a3b4c5d");
+        assertTrue(properties.hasUsableWebhookToken());
     }
 
     /**
