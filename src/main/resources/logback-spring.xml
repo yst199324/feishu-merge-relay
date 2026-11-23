@@ -110,6 +110,14 @@
     <logger name="org.springframework" level="INFO"/>
     <logger name="org.apache.catalina" level="INFO"/>
     <logger name="com.yiyu.relay" level="INFO"/>
+    <!--
+      入口留档（InboundLog）的级别单独钉死，不继承 com.yiyu.relay。
+      理由：它承担"每一条推送都留下请求头和报文原文"的职责，是排查的唯一原始证据。
+      如果不单独写，运维为了减噪把 com.yiyu.relay 调到 WARN，这条链就静默消失 ——
+      不报错、不提示，只有等真出问题去翻日志才发现"什么都没有"。
+      ConfigSanityChecker 启动时还会再核一遍，两道锁。
+    -->
+    <logger name="com.yiyu.relay.inbound" level="INFO"/>
 
     <root level="INFO">
         <appender-ref ref="consoleAppender"/>

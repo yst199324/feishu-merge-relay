@@ -64,7 +64,15 @@ public class TargetProbe {
                 break;
             case RETRYABLE:
             default:
-                log.warn("合并项目还没起来或暂时连不上：{}（{}）。等它起来后队列会自动补发", targetUrl, result.describe());
+                // 这里不能承诺"等它起来后会自动补发"：探针只知道"现在连不上"，
+                // 不知道对方起来后内部入口到底开没开。若没开，后续转发会拿到 404，
+                // 按设计直接进死信、一次都不重试，只能手工补发。
+                // 把前提说清楚，否则运维会以为"等它起来就好了"——而消息已经全进死信了。
+                log.warn("合并项目还没起来或暂时连不上：{}（{}）。"
+                                + "注意：如果它起来时内部入口没开（INTERNAL_ENDPOINT=false），"
+                                + "后续转发会拿到 404，那批消息会直接进死信、不会自动补发；"
+                                + "确认入口打开后用 requeue-dead.sh 补",
+                        targetUrl, result.describe());
                 break;
         }
     }

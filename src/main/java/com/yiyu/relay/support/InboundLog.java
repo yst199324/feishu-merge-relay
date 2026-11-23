@@ -31,14 +31,15 @@ public final class InboundLog {
     /**
      * 收到推送，报文已读进内存时调用。
      *
+     * <p>这里刻意<b>不加</b> {@code isInfoEnabled()} 提前返回：级别已经在
+     * {@code logback-spring.xml} 里钉成 INFO、启动自检还会再核一遍。留着那种判断，
+     * 会让后来的人以为"关掉 INFO 也不影响留档"，而实际上正相反 ——
+     * 这条日志就是留档本身。</p>
+     *
      * @param request 原始请求
      * @param payload 报文原始字节
      */
     public static void received(HttpServletRequest request, byte[] payload) {
-        if (!INBOUND.isInfoEnabled()) {
-            // 拼这一大串要遍历请求头和整份报文，关掉 INFO 时不该白花这个力气
-            return;
-        }
         INBOUND.info("收到推送 from={} realIp={} {} {} headers={} bytes={} body={}",
                 request.getRemoteAddr(),
                 clientIp(request),
@@ -68,6 +69,31 @@ public final class InboundLog {
                 HeaderDumper.dump(new ServletServerHttpRequest(request).getHeaders()),
                 declared,
                 maxBytes);
+    }
+
+    /**
+     * 读报文中途失败时调用（客户端断开、连接重置）。
+     *
+     * <p>拿不到完整正文，但<b>请求头必须留下</b>：否则这条请求在日志里只剩一行
+     * 「读取报文失败」，连是谁发的、带了哪些头都不知道 —— 正是这个改造要消灭的情形。</p>
+     *
+     * <p>声明长度也一起记：它和"读失败"这个事实放在一起，能区分
+     * "客户端说到一半跑了"和"我们这边读的时候出了问题"。</p>
+     *
+     * <p>用 WARN 不用 INFO：这是异常路径，不该跟正常留档一起被级别调高带走。</p>
+     *
+     * @param request 原始请求
+     * @param cause   读失败的原因，可为 null
+     */
+    public static void readFailed(HttpServletRequest request, Exception cause) {
+        INBOUND.warn("收到推送（读报文失败，正文不完整） from={} realIp={} {} {} headers={} declaredBytes={} error={}",
+                request.getRemoteAddr(),
+                clientIp(request),
+                request.getMethod(),
+                request.getRequestURI(),
+                HeaderDumper.dump(new ServletServerHttpRequest(request).getHeaders()),
+                request.getContentLengthLong(),
+                cause == null || cause.getMessage() == null ? "（无异常信息）" : cause.getMessage());
     }
 
     /**

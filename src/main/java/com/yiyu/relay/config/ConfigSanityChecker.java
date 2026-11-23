@@ -30,6 +30,9 @@ public class ConfigSanityChecker {
     /** 读超时高于这个值就没意义了：待发队列串行，一条卡住会拖住整轮，积压恢复更慢。 */
     private static final int MAX_REASONABLE_READ_TIMEOUT_MS = 180000;
 
+    /** 入口留档的 logger 名。与 {@code InboundLog}、{@code logback-spring.xml} 里的必须一致。 */
+    private static final String INBOUND_LOGGER_NAME = "com.yiyu.relay.inbound";
+
     private final RelayProperties properties;
 
     public ConfigSanityChecker(RelayProperties properties) {
@@ -42,6 +45,26 @@ public class ConfigSanityChecker {
         checkMaxAgeAgainstRetryLadder();
         checkYieldThreshold();
         checkTargetConfiguration();
+        checkInboundLogLevel();
+    }
+
+    /**
+     * 入口留档的级别被关掉了吗。
+     *
+     * <p>不检查配置值、直接问 logger 本身：级别可能来自 {@code logback-spring.xml}、
+     * {@code logging.level}、启动参数，来源太多，读配置猜不准。</p>
+     *
+     * <p>关掉之后的症状是"每条推送都不再留原文，而且不报任何错"——属于必须喊出来的问题，
+     * 所以用 ERROR，不是 WARN。</p>
+     */
+    private void checkInboundLogLevel() {
+        if (LoggerFactory.getLogger(INBOUND_LOGGER_NAME).isInfoEnabled()) {
+            return;
+        }
+        log.error("入口留档日志（{}）的 INFO 级别被关闭：收到推送时不会再记录请求头和报文原文，"
+                        + "出问题就没有原始证据可查了。请检查 logback-spring.xml 里那个 logger，"
+                        + "以及 logging.level.{} 有没有被调高",
+                INBOUND_LOGGER_NAME, INBOUND_LOGGER_NAME);
     }
 
     private void checkWebhookToken() {

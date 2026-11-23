@@ -80,6 +80,9 @@ public class WebhookController {
             log.error("报文超限，拒绝落盘：上限 {} 字节", e.getMaxBytes());
             return respond(HttpStatus.PAYLOAD_TOO_LARGE, "报文超过上限");
         } catch (IOException e) {
+            // 正文没读全（客户端说到一半断了），但请求头必须留下：否则这条请求在日志里
+            // 只剩一行"读取报文失败"，连是谁发的、带了哪些头都不知道。
+            InboundLog.readFailed(request, e);
             log.error("读取报文失败，按投递失败返回 500（{}）", e.getMessage());
             return respond(HttpStatus.INTERNAL_SERVER_ERROR, "读取报文失败");
         }
