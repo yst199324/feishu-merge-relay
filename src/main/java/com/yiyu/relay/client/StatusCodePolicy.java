@@ -21,8 +21,14 @@ public class StatusCodePolicy {
     /** 已收下的状态码。201/204 是"创建成功/无内容"，同样算成功。 */
     private static final int[] SUCCESS_STATUSES = {200, 201, 204};
 
-    /** 重试无用的状态码。413 是报文超限（合并项目的限额比这里小的话会出现）。 */
-    private static final int[] PERMANENT_STATUSES = {400, 413};
+    /**
+     * 重试无用的状态码。
+     *
+     * <p>400 报文不合法、413 报文超限、422 语义不合法：重投多少次都是同样的结果。
+     * 401/403 是鉴权被拒 —— 令牌不会自己变好，重试只是白耗六档阶梯（累计约 2 小时 37 分）
+     * 再进死信，不如立刻落死信、把原因记成 auth，运维才知道"换完令牌就能补"。</p>
+     */
+    private static final int[] PERMANENT_STATUSES = {400, 401, 403, 413, 422};
 
     /** 内部入口没开或路径写错。必须单独归类，不能按可重试处理。 */
     private static final int[] ENDPOINT_MISSING_STATUSES = {404, 405};

@@ -1,6 +1,8 @@
 package com.yiyu.relay.queue;
 
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -130,15 +132,34 @@ public final class QueueFileName {
     }
 
     /**
-     * 文件名是否属于某个投递编号（入队查重用，只比前缀不比内容）。
+     * 文件名是否属于某个投递编号（入队查重用）。
      *
-     * @param fileName   文件名
-     * @param deliveryId 已清洗的投递编号
+     * <p>必须解析出文件名里真正的编号段再全等比较，<b>不能比字符串前缀</b>：
+     * 编号允许含下划线，`abc` 会把 `abc_x` 的文件认成自己的 —— 后到的那条就会被当成
+     * "重复投递"、回 200 不落盘，等于静默丢消息。云效的 UUID 不含下划线所以碰不到，
+     * 但规则上不该留这个口子。</p>
+     *
+     * <p>三种队列的文件名格式不同（编号段后面跟的字段个数不一样），
+     * 所以必须知道文件在哪个目录里才能正确切出编号，不能只给文件名。</p>
+     *
+     * @param directoryName 所在目录名（pending / retry / dead）
+     * @param fileName      文件名
+     * @param deliveryId    已清洗的投递编号
      * @return true 表示同一条消息
      */
-    public static boolean belongsTo(String fileName, String deliveryId) {
-        return fileName.equals(deliveryId + SUFFIX)
-                || fileName.startsWith(deliveryId + SEPARATOR);
+    public static boolean belongsTo(String directoryName, String fileName, String deliveryId) {
+        if (fileName == null || deliveryId == null || deliveryId.isEmpty()) {
+            return false;
+        }
+        // 正常来说 fileName 来自目录列举，一定是合法文件名；但这是公开方法，
+        // 传进来一个含 Windows 非法字符（如冒号）的字符串时 Paths.get 会抛异常。
+        // 查重的语义是"认不出来就当不是"，所以吞掉异常返回 false，别让它把整轮扫描打断。
+        try {
+            QueueFile parsed = parse(directoryName, Paths.get(fileName));
+            return parsed != null && deliveryId.equals(parsed.getDeliveryId());
+        } catch (InvalidPathException e) {
+            return false;
+        }
     }
 
     /** 进死信时间格式化成 {@code yyyyMMddHHmmss}，只用于文件名和人眼阅读。 */

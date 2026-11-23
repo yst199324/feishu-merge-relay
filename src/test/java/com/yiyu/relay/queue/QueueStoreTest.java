@@ -252,13 +252,37 @@ class QueueStoreTest {
     @Test
     @DisplayName("文件名解析：不合规的文件被跳过，不影响整轮扫描")
     void malformedFileNamesAreSkipped() throws IOException {
-        assertFalse(QueueFileName.belongsTo("not-a-queue-file.json", "abc"));
+        assertFalse(QueueFileName.belongsTo(QueueStore.DIR_PENDING, "not-a-queue-file.json", "abc"));
         Path pendingDir = queueStore.resolveDirectory(QueueStore.DIR_PENDING);
         Files.write(pendingDir.resolve("readme.txt"), "hello".getBytes(StandardCharsets.UTF_8));
         Files.write(pendingDir.resolve("abc_notanumber.json"), PAYLOAD);
         Files.write(pendingDir.resolve(".abc_1.json.tmp"), PAYLOAD);
 
         assertTrue(queueStore.listPending().isEmpty(), "非法文件名不应被当成消息");
+    }
+
+    @Test
+    @DisplayName("查重按编号全等比较：abc 不会把 abc_x 的文件认成自己的")
+    void belongsToComparesWholeId() {
+        long now = System.currentTimeMillis();
+        String otherFile = QueueFileName.pending("abc_x", now);
+
+        // 这一条是回归守卫：原来用 startsWith("abc_") 判断，abc 会把 abc_x 认成自己，
+        // 后到的消息就被当成"重复投递"回 200 不落盘 —— 静默丢消息
+        assertFalse(QueueFileName.belongsTo(QueueStore.DIR_PENDING, otherFile, "abc"),
+                "前缀相同的两个编号不是同一条消息");
+        assertTrue(QueueFileName.belongsTo(QueueStore.DIR_PENDING, otherFile, "abc_x"));
+
+        // 编号本身带下划线时，三种队列的文件名都要能切出正确编号
+        assertTrue(QueueFileName.belongsTo(QueueStore.DIR_RETRY,
+                QueueFileName.retry("a_b_1", now, 2), "a_b_1"));
+        assertTrue(QueueFileName.belongsTo(QueueStore.DIR_DEAD,
+                QueueFileName.dead("a_b_1", now, now, QueueStore.REASON_BAD), "a_b_1"));
+        assertFalse(QueueFileName.belongsTo(QueueStore.DIR_DEAD,
+                QueueFileName.dead("a_b_1", now, now, QueueStore.REASON_BAD), "a_b"));
+
+        // 含 Windows 非法字符的文件名：认不出来就当不是，绝不能把整轮扫描打断
+        assertFalse(QueueFileName.belongsTo(QueueStore.DIR_PENDING, "a:b.json", "a:b"));
     }
 
     @Test

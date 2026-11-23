@@ -187,7 +187,7 @@ public class QueueDirectories {
         Path directory = resolve(directoryName);
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
             for (Path path : stream) {
-                if (QueueFileName.belongsTo(path.getFileName().toString(), deliveryId)) {
+                if (QueueFileName.belongsTo(directoryName, path.getFileName().toString(), deliveryId)) {
                     return QueueFileName.parse(directoryName, path);
                 }
             }

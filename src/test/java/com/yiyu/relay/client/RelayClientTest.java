@@ -120,6 +120,33 @@ class RelayClientTest {
     }
 
     @Test
+    @DisplayName("401 / 403 → 永久失败且标记 auth（令牌不会自己变好，重试只是白等六档）")
+    void unauthorizedIsPermanentAndFlagged() {
+        responseStatus = 401;
+        ForwardResult unauthorized = relayClient.send(message());
+        assertEquals(ForwardOutcome.PERMANENT, unauthorized.getOutcome());
+        assertTrue(unauthorized.isCredentialFailure(), "401 本身就是鉴权被拒，不该再靠正文猜");
+
+        responseStatus = 403;
+        ForwardResult forbidden = relayClient.send(message());
+        assertEquals(ForwardOutcome.PERMANENT, forbidden.getOutcome());
+        assertTrue(forbidden.isCredentialFailure());
+    }
+
+    @Test
+    @DisplayName("400 带 reason=AUTH → 认出来，哪怕文案里一个敏感词都没有")
+    void authReasonFieldWins() {
+        responseStatus = 400;
+        // 正文刻意不含"凭据/令牌/token/401/unauthorized"任何一个，只能靠机器字段认
+        responseBody = "{\"outcome\":\"PERMANENT_FAIL\",\"reason\":\"AUTH\",\"note\":\"换完再来\"}";
+
+        ForwardResult result = relayClient.send(message());
+
+        assertEquals(ForwardOutcome.PERMANENT, result.getOutcome());
+        assertTrue(result.isCredentialFailure(), "必须靠 reason 字段认出来，而不是靠中文文案");
+    }
+
+    @Test
     @DisplayName("413 → 永久失败")
     void payloadTooLargeIsPermanent() {
         responseStatus = 413;
